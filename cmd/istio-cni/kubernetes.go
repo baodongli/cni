@@ -15,11 +15,12 @@
 package main
 
 import (
+	"strconv"
+
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
-	"strconv"
 )
 
 func NewK8sClient(conf PluginConf, logger *logrus.Entry) (*kubernetes.Clientset, error) {
@@ -34,12 +35,12 @@ func NewK8sClient(conf PluginConf, logger *logrus.Entry) (*kubernetes.Clientset,
 		&clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfig},
 		configOverrides).ClientConfig()
 	if err != nil {
-		logger.Debugf("Failed setting up kubernetes client with kubeconfig %s", kubeconfig)
+		logger.Infof("Failed setting up kubernetes client with kubeconfig %s", kubeconfig)
 		return nil, err
 	}
 
-	logger.Debugf("Set up kubernetes client with kubeconfig %s", kubeconfig)
-	logger.Debugf("Kubernetes config %v", config)
+	logger.Infof("Set up kubernetes client with kubeconfig %s", kubeconfig)
+	logger.Infof("Kubernetes config %v", config)
 
 	// Create the clientset
 	return kubernetes.NewForConfig(config)
@@ -55,7 +56,7 @@ func GetK8sPodInfo(client *kubernetes.Clientset, podName, podNamespace string) (
 	containers = make([]string, len(pod.Spec.Containers))
 	for containerIdx, container := range pod.Spec.Containers {
 		logrus.WithFields(logrus.Fields{
-			"pod": podName,
+			"pod":       podName,
 			"container": container.Name,
 		}).Debug("Inspecting container")
 		containers[containerIdx] = container.Name
@@ -66,15 +67,15 @@ func GetK8sPodInfo(client *kubernetes.Clientset, podName, podNamespace string) (
 		}
 		for _, containerPort := range container.Ports {
 			logrus.WithFields(logrus.Fields{
-				"pod": podName,
+				"pod":       podName,
 				"container": container.Name,
-				"port": containerPort,
+				"port":      containerPort,
 			}).Debug("Added pod port")
 
 			ports = append(ports, strconv.Itoa(int(containerPort.ContainerPort)))
 			logrus.WithFields(logrus.Fields{
-				"ports": ports,
-				"pod": podName,
+				"ports":     ports,
+				"pod":       podName,
 				"container": container.Name,
 			}).Debug("port")
 		}

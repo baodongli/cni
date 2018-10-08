@@ -26,31 +26,33 @@ import (
 	"github.com/containernetworking/cni/pkg/types/current"
 	"github.com/containernetworking/cni/pkg/version"
 
-	"github.com/sirupsen/logrus"
-	"github.com/projectcalico/libcalico-go/lib/logutils"
-	"strings"
 	"os"
 	"os/exec"
+	"strings"
+
+	"github.com/projectcalico/libcalico-go/lib/logutils"
+	"github.com/sirupsen/logrus"
 )
 
 var (
-	NsSetupBinDir = "/opt/cni/bin"
-	NsSetupProg = "istio-iptables.sh"
-	RedirectToPort = "15001"
-	NoRedirectUID = "1337"
-	RedirectMode = "REDIRECT" // other Option TPROXY
-	RedirectIpCidr = "*"
+	NsSetupBinDir         = "/opt/cni/bin"
+	NsSetupProg           = "istio-iptables.sh"
+	AddSidecarProg        = "add-sidecar.sh"
+	RedirectToPort        = "15001"
+	NoRedirectUID         = "1337"
+	RedirectMode          = "REDIRECT" // other Option TPROXY
+	RedirectIpCidr        = "*"
 	RedirectExcludeIpCidr = ""
-	RedirectExcludePort = "15020"
+	RedirectExcludePort   = "15020"
 )
 
 // Kubernetes a K8s specific struct to hold config
 type Kubernetes struct {
-	K8sAPIRoot string `json:"k8s_api_root"`
-	Kubeconfig string `json:"kubeconfig"`
-	NodeName   string `json:"node_name"`
+	K8sAPIRoot        string   `json:"k8s_api_root"`
+	Kubeconfig        string   `json:"kubeconfig"`
+	NodeName          string   `json:"node_name"`
 	ExcludeNamespaces []string `json:"exclude_namespaces""`
-	CniBinDir  string `json:"cni_bin_dir"`
+	CniBinDir         string   `json:"cni_bin_dir"`
 }
 
 // PluginConf is whatever you expect your configuration json to be. This is whatever
@@ -73,8 +75,8 @@ type PluginConf struct {
 	PrevResult    *current.Result         `json:"-"`
 
 	// Add plugin-specifc flags here
-	LogLevel             string            `json:"log_level"`
-	Kubernetes           Kubernetes        `json:"kubernetes"`
+	LogLevel   string     `json:"log_level"`
+	Kubernetes Kubernetes `json:"kubernetes"`
 }
 
 // K8sArgs is the valid CNI_ARGS used for Kubernetes
@@ -84,6 +86,13 @@ type K8sArgs struct {
 	K8S_POD_NAME               types.UnmarshallableString
 	K8S_POD_NAMESPACE          types.UnmarshallableString
 	K8S_POD_INFRA_CONTAINER_ID types.UnmarshallableString
+}
+
+func addSidecar(networkContainerID, podName, namespace, networkContainerIP string) error {
+	addSidecar := fmt.Sprintf("%s/%s", NsSetupBinDir, AddSidecarProg)
+	out, err := exec.Command(addSidecar, "-i", networkContainerID, "-p", podName, "-n", namespace, "-a", networkContainerIP).CombinedOutput()
+	logrus.Infof("%s %s %s %s %s: %v, %v", addSidecar, networkContainerID, podName, namespace, networkContainerIP, string(out[:]), err)
+	return err
 }
 
 func setupRedirect(netns string, ports []string) error {
@@ -102,16 +111,16 @@ func setupRedirect(netns string, ports []string) error {
 	}
 	logrus.WithFields(logrus.Fields{
 		"nsenterArgs": nsenterArgs,
-	}).Info("nsenter args")
+	}).Infof("nsenter args")
 	out, err := exec.Command("nsenter", nsenterArgs...).CombinedOutput()
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"out": string(out[:]),
 			"err": err,
 		}).Errorf("nsenter failed: %v", err)
-		logrus.Debugf("nsenter out: %s", out)
+		logrus.Infof("nsenter out: %s", out)
 	} else {
-		logrus.Debugf("nsenter done: %s", out)
+		logrus.Infof("nsenter done: %s", out)
 	}
 	return err
 }
@@ -174,7 +183,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 
 	logrus.WithFields(logrus.Fields{
-		"version": conf.CNIVersion,
+		"version":    conf.CNIVersion,
 		"prevResult": conf.PrevResult,
 	}).Info("cmdAdd config parsed")
 
@@ -191,9 +200,9 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 	var logger *logrus.Entry
 	logger = logrus.WithFields(logrus.Fields{
-			"ContainerID":      args.ContainerID,
-			"Pod":              string(k8sArgs.K8S_POD_NAME),
-			"Namespace":        string(k8sArgs.K8S_POD_NAMESPACE),
+		"ContainerID": args.ContainerID,
+		"Pod":         string(k8sArgs.K8S_POD_NAME),
+		"Namespace":   string(k8sArgs.K8S_POD_NAMESPACE),
 	})
 
 	// Check if the workload is running under Kubernetes.
@@ -215,27 +224,29 @@ func cmdAdd(args *skel.CmdArgs) error {
 			if k8sErr != nil {
 				logger.Warnf("Error geting Pod data %v", k8sErr)
 			}
-			for _, container := range containers {
-				if container == "istio-proxy" {
-					logger.Info("Found an istio-proxy container")
-					if len(containers) > 1 {
-						logrus.WithFields(logrus.Fields{
-							"ContainerID": args.ContainerID,
-							"netns":       args.Netns,
-							"pod":         string(k8sArgs.K8S_POD_NAME),
-							"Namespace":   string(k8sArgs.K8S_POD_NAMESPACE),
-							"ports":       ports,
-						}).Info("Updating iptables redirect for Istio proxy")
+			//for _, container := range containers {
+			//if container == "istio-proxy" {
+			logger.Infof("Found containers %v", containers)
+			if len(containers) >= 1 {
+				logrus.WithFields(logrus.Fields{
+					"ContainerID": args.ContainerID,
+					"netns":       args.Netns,
+					"pod":         string(k8sArgs.K8S_POD_NAME),
+					"Namespace":   string(k8sArgs.K8S_POD_NAMESPACE),
+					"ports":       ports,
+				}).Infof("Updating iptables redirect for Istio proxy")
 
-						_ = setupRedirect(args.Netns, ports)
-					}
-				}
+				_ = setupRedirect(args.Netns, ports)
+
+				_ = addSidecar(args.ContainerID, string(k8sArgs.K8S_POD_NAME), string(k8sArgs.K8S_POD_NAMESPACE), fmt.Sprintf("%s", conf.PrevResult.IPs[0].Address.IP))
 			}
+			//}
+			//}
 		} else {
-			logger.Info("Pod excluded")
+			logger.Infof("Pod excluded")
 		}
 	} else {
-		logger.Info("No Kubernetes Data")
+		logger.Infof("No Kubernetes Data")
 	}
 
 	// Pass through the result for the next plugin

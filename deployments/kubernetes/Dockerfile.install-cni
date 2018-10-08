@@ -8,6 +8,8 @@ RUN apk --update add jq && \
 
 ADD istio-cni /opt/cni/bin/
 ADD istio-iptables.sh /opt/cni/bin/
+ADD add-sidecar.sh /opt/cni/bin/
+ADD cleanup-istio-proxy.sh /opt/cni/bin/
 ADD install-cni.sh /install-cni.sh
 ADD istio-cni.conf.default /istio-cni.conf.tmp
 

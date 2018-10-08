@@ -103,13 +103,13 @@ spec:
         # This container installs the Istio CNI binaries
         # and CNI network config file on each node.
         - name: install-cni
-          image: docker.io/tiswanso/install-cni:v0.1-dev
+          image: docker.io/baodongli/install-cni:dev
           imagePullPolicy: Always
           command: ["/install-cni.sh"]
           env:
             # Name of the CNI config file to create.
             - name: CNI_CONF_NAME
-              value: "10-calico.conflist"
+              value: "10-flannel.conflist"
             # The CNI network config to install on each node.
             - name: CNI_NETWORK_CONFIG
               valueFrom:
