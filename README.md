@@ -1,66 +1,91 @@
-# Istio CNI plugin (WIP/PoC)
+# loosely coupled istio envoy sidecar (WIP/POC)
 
-For application pods in the Istio service mesh, all traffic to/from the pods needs to go through the
-sidecar proxies (istio-proxy containers).  This `istio-cni` CNI plugin PoC will set up the
-pods' networking to fullfill this requirement in place of the current Istio injected pod `initContainers`
-`istio-init` approach.
+This work is built on top of istio-cni which this repo is currently forked from.
 
-This is currently accomplished (for IPv4) via configuring the iptables rules in the netns for the pods.
+Currently there are two ways to inject istio envoy sidecar:
 
-The CNI handling the netns setup replaces the current Istio approach using a `NET_ADMIN` privileged
-`initContainers` container, `istio-init`, injected in the pods along with `istio-proxy` sidecars.  This
-removes the need for a privileged, `NET_ADMIN` container in the Istio users' application pods.
+1. Automatically by istio-sidecar-injector
+1. Manually by istioctl kube-inject
 
-## Comparison with Pod Network Controller Approach
+Both methods insert an istio-proxy container spec into the application
+manifests. Therefore, the envoy sidecar and the application itself become
+tightly coupled in every aspects: lifecycle management, security, to name a
+couple of things. This document [Sidecar-less Istio](https://docs.google.com/document/d/1vb9qIKTNnODWo_Uij2BGDrFj6gVygllRq5zrXmniLxc/edit#heading=h.qex63c29z2to)
+describes the issues associated with the current sidecar injection mechanisms.
 
-The proposed [Istio pod network controller](https://github.com/sabre1041/istio-pod-network-controller) has
-the problem of synchronizing the netns setup with the rest of the pod init.  This approach requires implementing
-custom synchronization between the controller and pod initialization.
+Istio-cni eliminates the need of init containers, while performing the function
+of configuring traffic redirection for the application pods. On top of that,
+this work injects the envoy sidecar container into the application pod's network
+namespace. In addition to invoke istio-iptables.sh to configure iptables in the
+application pod's network namespace, it also invokes add-sidecar.sh to add an
+envoy sidecar container to the application pod's network namespace.
 
-Kubernetes has already solved this problem by not starting any containers in new pods until the full CNI plugin
-chain has completed successfully.  Also, architecturally, the CNI plugins are the components responsible for network
-setup for container runtimes.
+As a result, the application pod and the envoy sidecar become loosely coupled.
+This opens a door to allow issues described in Sidecar-less Istio to be solved.
+As it is now, this work is very preliminary just to illustrate the concept and
+how it'd work in principle. Later section will discuss potential
+design/implementation for a complete implementation.
 
-## Usage
-The following are the steps to install and use the CNI plugin.
+## usage
+### Install
+The following are the steps to install this plugin
 
 1. clone this repo
 
-1. Install Istio control-plane
+1. Install Istio control-plane (My setup uses PERMISSIVE for MTLS for POC
+   purpose)
 
 1. Modify [istio-cni.yaml](deployments/kubernetes/install/manifests/istio-cni.yaml)
    1. set `CNI_CONF_NAME` to the filename for your k8s cluster's CNI config file in `/etc/cni/net.d`
-   1. set `exclude_namespaces` to include the namespace the Istio control-plane is installed in
    1. set `cni_bin_dir` to your kubernetes install's CNI bin location (the value of kubelet's `--cni-bin-dir`)
       1. default is `/opt/cni/bin`
 
 1. Install `istio-cni`: `kubectl apply -f deployments/kubernetes/install/manifests/istio-cni.yaml`
 
-1. remove the `initContainers` section from the result of helm template's rendering of
-   istio/templates/sidecar-injector-configmap.yaml and apply it to replace the
-   `istio-sidecar-injector` configmap.  --e.g. pull the `istio-sidecar-injector` configmap from
-   `istio.yaml` and remove the `initContainers` section and `kubectl apply -f <configmap.yaml>`
-   1. restart the `istio-sidecar-injector` pod via `kubectl delete pod ...`
+1. Get istio.default secret, and decode them into separate files: cert-chain.pem
+   key.pem and root-cert.pem following [decoding
+   secret](https://kubernetes.io/docs/concepts/configuration/secret/#decoding-a-secret)
 
-1. With auto-sidecar injection, the init containers will no longer be added to the pods and the CNI
-   will be the component setting the iptables up for the pods.
+1. create a directory /opt/certs on each of the k8s nodes
 
-## Validate the iptables are modified
+1. copy the three files into /opt/certs on each of the k8s nodes
 
-1. Collect your pod's container id using kubectl.
+### Deploy bookinfo
+
+All that needs to be done is to invoke `kubectl apply -f bookinfo.yaml`
+
+### Validate envoy sidecars are running
+
+On the node(s) where bookinfo pods are running, invoke:
+
 ```
-$ ns=test-istio
-$ podnm=reviews-v1-6b7f6db5c5-59jhf
-$ container_id=$(kubectl get pod -n ${ns} ${podnm} -o jsonpath="{.status.containerStatuses[?(@.name=='istio-proxy')].containerID}" | sed -n 's/docker:\/\/\(.*\)/\1/p')
+sudo docker ps | grep istio-proxy | grep -v k8s
+```
+to verify that envoy sidecars are running for all the bookinfo pods.
+
+Note down the container id for the productpage istio-proxy sidecar.
+
+Find the productpage pod's IP address, and then call the productpage service:
+
+```
+curl <productpage IP>:9080/productpage
 ```
 
-2. SSH into the Kubernetes' worker node that runs your pod.
+An html document should be returned and displayed on the screen.
 
-3. Use `nsenter` to view the iptables.
+To verify that the productpage istio-proxy sidecar is in the data path:
+
 ```
-$ cpid=$(docker inspect --format '{{ .State.Pid }}' $container_id)
-$ nsenter -t $cpid -n iptables -L -t nat -n -v --line-numbers -x
+sudo docker logs <productpage istio-proxy container_id>
 ```
+
+You should see that the bookinfo services were called.
+
+### Cleanup
+
+After undeploying bookinfo, currently you have to run
+`/opt/cni/bin/cleanup-istio-proxy.sh` to remove all the sidecar containers in
+each of the k8s nodes. 
 
 ### Hosted Kubernetes
 
@@ -78,7 +103,7 @@ of hosted Kubernetes environments and whether `istio-cni` has been trialed in th
 | AKS (Azure) | Y | N |
 | Red Hat OpenShift 3.10| Y | Y |
 
-#### GKE Setup
+#### GKE Setup (not verified)
 
 1. Enable [network-policy](https://cloud.google.com/kubernetes-engine/docs/how-to/network-policy) in your cluster.  NOTE: for existing clusters this redeploys the nodes.
 
@@ -90,14 +115,13 @@ of hosted Kubernetes environments and whether `istio-cni` has been trialed in th
 
 1. Install Istio
 
-1. remove the `initContainers` section from the result of helm template's rendering of
-   istio/templates/sidecar-injector-configmap.yaml and apply it to replace the
-   `istio-sidecar-injector` configmap.  --e.g. pull the `istio-sidecar-injector` configmap from
-   `istio.yaml` and remove the `initContainers` section and `kubectl apply -f <configmap.yaml>`
-   1. restart the `istio-sidecar-injector` pod via `kubectl delete pod ...`
+1. Get istio.default secret, and decode them into separate files: cert-chain.pem
+   key.pem and root-cert.pem following [decoding
+   secret](https://kubernetes.io/docs/concepts/configuration/secret/#decoding-a-secret)
 
-1. With auto-sidecar injection, the init containers will no longer be added to the pods and the CNI
-   will be the component setting the iptables up for the pods.
+1. create a directory /opt/certs on each of the k8s nodes
+
+1. copy the three files into /opt/certs on each of the k8s nodes
 
 ### IKS Setup
 
@@ -136,106 +160,65 @@ $ ISTIO_CNI_RELPATH=github.com/some/cni GOOS=linux make build
 To push the Docker image:
 
 ```sh
-$ export HUB=docker.io/tiswanso
-$ export TAG=dev
-$ GOOS=linux make docker.push
+$ HUB=docker.io/baodongli TAG=dev GOOS=linux make docker.push
 ```
 
-**NOTE:** Set HUB and TAG per your docker registry.
+**NOTE:** Set HUB and TAG per your docker registry. But you need to modify
+`deployments/kubernetes/install/manifests/istio-cni.yaml` to use your
+own image.
 
-## Implementation Details
+## How it works
+![Start sequence for application pod and its sidecar](pod-sidecar-start.png)
 
-**TODOs**
-- Figure out any CNI version specific semantics.
-- Add plugin parameters for included/exclude IP CIDRs
-- Add plugin parameters for proxy params, ie. listen port, UID, etc.
-- Make `istio-cni.yaml` into a helm chart
+Briefly:
+1. Kubelet creates and runs the Pause container
+1. Kubelet invokes the cni plugins to setup networking. 
+1. istio-cni plugin is called as the last cni plugin. It installs iptables into
+   the pod's networking namespace.
+1. It then calls another script add-sidecar.sh which creates a docker container
+   that runs istio proxy in the same network namespace as the pod's
+1. kubelet receives responses from cni, and goes forward with the remaining
+   tasks to bring up the pod. This includes any containers running in the pod.
 
-### Overview
+As can be seen, the flow is quite fit with the istio init flow.
 
-- [istio-cni.yaml](deployments/kubernetes/install/manifests/istio-cni.yaml)
-   - manifest for deploying `install-cni` container as daemonset
-   - `istio-cni-config` configmap with CNI plugin config to add to CNI plugin chained config
-   - creates service-account `istio-cni` with `ClusterRoleBinding` to allow gets on pods' info
+For envoy to be able to connect to Pilot, the istio.default secret is decoded
+into certificate files, and copied over to /opt/certs in each of the k8s nodes.
+The istio-proxy container is then started with a bind mount to /opt/certs. Note
+that this is just for quick POC.
 
-- `install-cni` container
-   - copies `istio-cni` binary and `istio-iptables.sh` to `/opt/cni/bin`
-   - creates kubeconfig for the service account the pod is run under
-   - injects the CNI plugin config to the config file pointed to by CNI_CONF_NAME env var
-     - example: `CNI_CONF_NAME: 10-calico.conflist`
-     - `jq` is used to insert `CNI_NETWORK_CONFIG` into the `plugins` list in `/etc/cni/net.d/${CNI_CONF_NAME}`
+## Design/Implementation
+A complete design and implementation of loosely coupled istio envoy sidecar
+requires more than the above basic flow. It can be imagined that each node runs
+a sidecar manager that is repsonsible for the sidecar lifecycle management. This
+sidecar manager work with the istio-cni and other necessary components (such
+as sidecarctl, e.g.) to:
 
-- `istio-cni`
-  - CNI plugin executable copied to `/opt/cni/bin`
-  - currently implemented for k8s only
-  - on pod add, determines whether pod should have netns setup to redirect to Istio proxy
-    - if so, calls `istio-iptables.sh` with params to setup pod netns
+1. Start/stop istio envoy sidecars
 
-- [istio-iptables.sh](tools/istio-cni-docker.mk)
-  - direct copy of Istio's [istio-iptables.sh0(https://github.com/istio/istio/blob/master/tools/deb/istio-iptables.sh)
-  - sets up iptables to redirect a list of ports to the port envoy will listen
+1. Mount secrets
 
-### Background
-The framework for this implementation of the CNI plugin is based on the
-[containernetworking sample plugin](https://github.com/containernetworking/plugins/blob/master/plugins/sample).
+1. Upgrade sidecars without impacting application traffic with enovy hot restart
 
-#### Build Toolchains
-The Istio makefiles and container build logic was leveraged heavily/lifted for this repo.
+1. Maintain clear security separation between application pods and sidecars
 
-Specifically:
-- golang build logic
-- multi-arch target logic
-- k8s lib versions (Gopkg.toml)
-- docker container build logic
-  - setup staging dir for docker build
-  - grab built executables from target dir and cp to staging dir for docker build
-  - tagging and push logic
+1. Configure traffic redirection to the sidecars.
 
-#### Deployment 
-The details for the deployment & installation of this plugin were pretty much lifted directly from the
-[Calico CNI plugin](https://github.com/projectcalico/cni-plugin).
+1. Potentially monitor dynamic ports and traffic redirection 
 
-Specifically:
-  - [CNI installation script](https://github.com/projectcalico/cni-plugin/blob/master/k8s-install/scripts/install-cni.sh)
-    - This does the following
-      - sets up CNI conf in /host/etc/cni/net.d/*
-      - copies calico CNI binaries to /host/opt/cni/bin
-      - builds kubeconfig for CNI plugin from service-account info mounted in the pod:
-        https://github.com/projectcalico/cni-plugin/blob/master/k8s-install/scripts/install-cni.sh#L142
-      - reference: https://kubernetes.io/docs/reference/access-authn-authz/service-accounts-admin/
-  - The CNI installation script is containerized and deployed as a daemonset in k8s.  The relevant
-    calico k8s manifests were used as the model for the istio-cni plugin's manifest:
-    - [daemonset and configmap](https://docs.projectcalico.org/v3.2/getting-started/kubernetes/installation/hosted/calico.yaml)
-      - search for the `calico-node` Daemonset and its `install-cni` container deployment
-    - [RBAC](https://docs.projectcalico.org/v3.2/getting-started/kubernetes/installation/rbac.yaml)
-      - this creates the service account the CNI plugin is configured to use to access the kube-api-server
+In the case of per-pod sidecar, the lifecycle of a pod's sidecar remains
+concurrent with the pod itself. But it allows the sidecar to be
+upgraded/downgraded without impacting the application pod with enchanced
+security. In addition, with the sidecar taking out of the application pod, the
+sidecar manager can be designed to support shared sidecars. A shared sidecar's
+lifecycle is independent from that of the application pods which it's proxied
+for.
 
-The installation script `install-cni.sh` injects the `istio-cni` plugin config at the end of the CNI plugin chain
-config.  It creates or modifies the file from the configmap created by the Kubernetes manifest.
+From high level for the per-pod sidecar, it's like two pods (the application pod
+and the sidecar pod) running side-by-side in the same network namespace. From
+that sense, it may be possible to generalize it for k8s sidecar management and
+have it incorporated into the k8s API.
 
-#### Plugin Logic
-
-##### cmdAdd
-Workflow:
-1.  Check k8s pod namespace against exclusion list (plugin config)
-    1.  Config must exclude namespace that Istio control-plane is installed in
-    1.  if excluded, ignore the pod and return prevResult
-1.  Get k8s pod info
-    1.  determine containerPort list
-1.  Determine if the pod needs to be setup for Istio sidecar proxy
-    1.  if pod has a container named `istio-proxy` AND pod has more than 1 container
-        1.  Final Logic TBD -- e.g. pod labels?  namespace checks?
-1.  Setup iptables with the required port list
-    1.  `nsenter --net=<k8s pod netns> /opt/cni/bin/istio-iptables.sh ...`
-1.  Return prevResult
-
-**TBD** istioctl / auto-sidecar-inject logic for handling things like specific include/exclude IPs and any
-other features.
--  Watch configmaps or CRDs and update the `istio-cni` plugin's config
-   with these options.
-
-##### cmdDel
-Anything needed?  The netns is destroyed by kubelet so ideally this is a NOOP.
-
-##### Logging
-The plugin leverages `logrus` & directly utilizes some Calico logging lib util functions.
+On the other hand, this can be specifically designed for istio eonvy. And the
+sidecar manager can be a k8s controller running as a daemonset to perform the
+above functionality.

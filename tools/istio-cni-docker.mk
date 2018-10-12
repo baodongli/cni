@@ -33,11 +33,11 @@ $(foreach FILE,$(DOCKER_FILES_FROM_ISTIO_OUT), \
         $(eval $(ISTIO_DOCKER)/$(FILE): $(ISTIO_OUT)/$(FILE) | $(ISTIO_DOCKER); cp $$< $$(@D)))
 
 # tell make which files are copied from the source tree
-DOCKER_FILES_FROM_SOURCE:=tools/deb/istio-iptables.sh
+DOCKER_FILES_FROM_SOURCE:=tools/deb/istio-iptables.sh,tools/deb/add-sidecar.sh,tools/deb/cleanup-istio-proxy.sh
 $(foreach FILE,$(DOCKER_FILES_FROM_SOURCE), \
         $(eval $(ISTIO_DOCKER)/$(notdir $(FILE)): $(FILE) | $(ISTIO_DOCKER); cp $(FILE) $$(@D)))
 
-docker.install-cni: $(ISTIO_OUT)/istio-cni tools/deb/istio-iptables.sh \
+docker.install-cni: $(ISTIO_OUT)/istio-cni tools/deb/istio-iptables.sh tools/deb/add-sidecar.sh tools/deb/cleanup-istio-proxy.sh \
 		deployments/kubernetes/install/scripts/install-cni.sh \
 		deployments/kubernetes/install/scripts/istio-cni.conf.default \
 		deployments/kubernetes/Dockerfile.install-cni \
